@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+
+contract AmalTransparan is ERC721URIStorage {
+
+    enum Status {
+        PENDING,
+        MANAGED,
+        DISTRIBUTED,
+        VERIFIED
+    }
+
+    // Data donasi sekaligus data aset yang ditokenisasi
+    // id digunakan sebagai Token ID
+    struct Donation {
+        uint256 id;
+        string campaignId;
+        string donorName;
+        address donor;
+        uint256 amount;
+        string purpose;
+        Status status;
+        uint256 timestamp;
+    }
+
+    // Token ID dimulai dari 1
+    uint256 private nextTokenId = 1;
+
+    address public pengelola;
+    address public pengawas;
+
+    mapping(uint256 => Donation) public donations;
+    mapping(string => uint256[]) public campaignDonations;
+    mapping(string => uint256) public campaignBalance;
+    mapping(string => uint256) public campaignDistributedTotal;
+
+    event DonationCreated(
+        uint256 indexed donationId,
+        string campaignId,
+        address indexed donor,
+        uint256 amount
+    );
+
+    event DonationManaged(
+        uint256 indexed donationId,
+        string purpose
+    );
+
+    event AssistanceDistributed(
+        string campaignId,
+        string recipient,
+        uint256 amount
+    );
+
+    event DonationVerified(
+        string campaignId,
+        bool verified
+    );
+
+    // Constructor ERC-721 + pengelola
+    constructor() ERC721("AmalTransparan", "AMAL") {
+        pengelola = msg.sender;
+    }
+
+    modifier onlyPengelola() {
+        require(
+            msg.sender == pengelola,
+            "Bukan pengelola"
+        );
+        _;
+    }
+
+    modifier onlyPengawas() {
+        require(
+            msg.sender == pengawas,
+            "Bukan pengawas"
+        );
+        _;
+    }
+
+    // Fungsi mint NFT (sudah dibersihkan dari fungsi getDonationOwner yang terselip)
+    function mint(
+        address to,
+        string memory metadataURI
+    )
+        internal
+        returns (uint256)
+    {
+        uint256 tokenId = nextTokenId;
+        nextTokenId++;
+
+        _safeMint(to, tokenId);
+
+        // Metadata bersifat opsional
+        if (bytes(metadataURI).length > 0) {
+            _setTokenURI(tokenId, metadataURI);
+        }
+
+        return tokenId;
+    }
+
+    // Mengecek pemilik NFT (diletakkan di luar fungsi mint dengan validasi modul)
+    function getDonationOwner(
+        uint256 tokenId
+    )
+        public
+        view
+        returns (address)
+    {
+        require(
+            ownerOf(tokenId) != address(0),
+            "NFT tidak ditemukan"
+        );
+        return ownerOf(tokenId);
+    }
+
+    function setPengawas(
+        address _pengawas
+    )
+        external
+        onlyPengelola
+    {
+        require(
+            _pengawas != address(0),
+            "Alamat tidak valid"
+        );
+
+        pengawas = _pengawas;
+    }
+
+    // Membuat donasi sekaligus membuat NFT
+    function createDonation(
+        string memory _campaignId,
+        string memory _donorName,
+        uint256 _amount,
+        string memory _metadataURI
+    )
+        external
+        returns (uint256)
+    {
+        require(
+            bytes(_campaignId).length > 0,
+            "Campaign wajib diisi"
+        );
+
+        require(
+            bytes(_donorName).length > 0,
+            "Nama donatur wajib diisi"
+        );
+
+        require(
+            _amount > 0,
+            "Jumlah donasi harus lebih dari 0"
+        );
+
+        // Membuat Token ID dan NFT
+        uint256 tokenId = mint(
+            msg.sender,
+            _metadataURI
+        );
+
+        // Menyimpan data donasi yang terhubung
+        // dengan Token ID
+        donations[tokenId] = Donation({
+            id: tokenId,
+            campaignId: _campaignId,
+            donorName: _donorName,
+            donor: msg.sender,
+            amount: _amount,
+            purpose: "",
+            status: Status.PENDING,
+            timestamp: block.timestamp
+        });
+
+        // Simpan Token ID ke campaign
+        campaignDonations[_campaignId].push(tokenId);
+
+        // Tambahkan saldo campaign
+        campaignBalance[_campaignId] += _amount;
+
+        emit DonationCreated(
+            tokenId,
+            _campaignId,
+            msg.sender,
+            _amount
+        );
+
+        return tokenId;
+    }
+
+    function manageDonation(
+        uint256 _donationId,
+        string memory _purpose
+    )
+        external
+        onlyPengelola
+    {
+        Donation storage donation =
+            donations[_donationId];
+
+        require(
+            donation.id != 0,
+            "Transaksi tidak ditemukan"
+        );
+
+        require(
+            donation.status == Status.PENDING,
+            "Donasi sudah diproses sebelumnya"
+        );
+
+        require(
+            bytes(_purpose).length > 0,
+            "Tujuan wajib diisi"
+        );
+
+        donation.purpose = _purpose;
+        donation.status = Status.MANAGED;
+        donation.timestamp = block.timestamp;
+
+        emit DonationManaged(
+            _donationId,
+            _purpose
+        );
+    }
+
+    function distributeDonation(
+        string memory _campaignId,
+        string memory _recipient,
+        uint256 _amount
+    )
+        external
+        onlyPengelola
+    {
+        require(
+            campaignDonations[_campaignId].length > 0,
+            "Campaign tidak ditemukan"
+        );
+
+        require(
+            bytes(_recipient).length > 0,
+            "Nama penerima wajib diisi"
+        );
+
+        require(
+            _amount > 0,
+            "Jumlah bantuan tidak valid"
+        );
+
+        require(
+            campaignBalance[_campaignId] >= _amount,
+            "Dana tidak mencukupi"
+        );
+
+        campaignBalance[_campaignId] -= _amount;
+
+        campaignDistributedTotal[_campaignId] += _amount;
+
+        uint256[] memory ids =
+            campaignDonations[_campaignId];
+
+        uint256 cumulative = 0;
+
+        for (uint256 i = 0; i < ids.length; i++) {
+
+            Donation storage donation =
+                donations[ids[i]];
+
+            if (donation.status == Status.MANAGED) {
+
+                cumulative += donation.amount;
+
+                if (
+                    cumulative <=
+                    campaignDistributedTotal[_campaignId]
+                ) {
+                    donation.status =
+                        Status.DISTRIBUTED;
+
+                    donation.timestamp =
+                        block.timestamp;
+                }
+            }
+        }
+
+        emit AssistanceDistributed(
+            _campaignId,
+            _recipient,
+            _amount
+        );
+    }
+
+    function verifyDonation(
+        string memory _campaignId
+    )
+        external
+        onlyPengawas
+    {
+        uint256[] memory ids =
+            campaignDonations[_campaignId];
+
+        require(
+            ids.length > 0,
+            "Transaksi tidak ditemukan"
+        );
+
+        bool hasDistributed = false;
+        bool valid = true;
+
+        for (uint256 i = 0; i < ids.length; i++) {
+
+            Donation memory donation =
+                donations[ids[i]];
+
+            if (
+                donation.status ==
+                Status.DISTRIBUTED
+            ) {
+                hasDistributed = true;
+
+                if (
+                    donation.id == 0 ||
+                    donation.amount == 0
+                ) {
+                    valid = false;
+                }
+            }
+        }
+
+        require(
+            hasDistributed,
+            "Belum ada bantuan yang disalurkan"
+        );
+
+        if (valid) {
+
+            for (uint256 i = 0; i < ids.length; i++) {
+
+                if (
+                    donations[ids[i]].status ==
+                    Status.DISTRIBUTED
+                ) {
+                    donations[ids[i]].status =
+                        Status.VERIFIED;
+
+                    donations[ids[i]].timestamp =
+                        block.timestamp;
+                }
+            }
+        }
+
+        emit DonationVerified(
+            _campaignId,
+            valid
+        );
+    }
+
+    function getHistory(
+        string memory _campaignId
+    )
+        external
+        view
+        returns (uint256[] memory)
+    {
+        return campaignDonations[_campaignId];
+    }
+
+    function getDonation(
+        uint256 _donationId
+    )
+        external
+        view
+        returns (
+            uint256,
+            string memory,
+            string memory,
+            address,
+            uint256,
+            string memory,
+            Status,
+            uint256
+        )
+    {
+        Donation memory donation =
+            donations[_donationId];
+
+        require(
+            donation.id != 0,
+            "Donation not found"
+        );
+
+        return (
+            donation.id,
+            donation.campaignId,
+            donation.donorName,
+            donation.donor,
+            donation.amount,
+            donation.purpose,
+            donation.status,
+            donation.timestamp
+        );
+    }
+}
